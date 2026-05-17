@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { CreditCard, Plus, RefreshCw } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { paymentsApi } from "../api/payments";
-import { bookingsApi } from "../api/bookings";
+import { subscriptionsApi } from "../api/subscriptions";
 import { adminApi } from "../api/admin";
 import AdminLayout from "../components/AdminLayout";
 import { useToast } from "../components/useToast";
@@ -13,38 +13,109 @@ const emptyForm = {
   subscription: "",
   amount: "",
   method: "cash",
-  status: "pending",
+  status: "completed",
 };
+
+function normalizeResponse(response) {
+  if (!response) return [];
+
+  if (Array.isArray(response)) return response;
+  if (Array.isArray(response.data)) return response.data;
+  if (Array.isArray(response.payments)) return response.payments;
+  if (Array.isArray(response.subscriptions)) return response.subscriptions;
+
+  return [];
+}
+
+function getCustomerName(item) {
+  if (!item) return "N/A";
+
+  const customer = item.customer || item.user;
+
+  if (!customer) return "N/A";
+
+  if (typeof customer === "string") return customer;
+
+  return (
+    customer.fullName ||
+    customer.name ||
+    customer.email ||
+    customer.username ||
+    "N/A"
+  );
+}
+
+function getSubscriptionName(item) {
+  if (!item) return "N/A";
+
+  return (
+    item.name ||
+    item.planName ||
+    item.title ||
+    item.type ||
+    "Subscription Plan"
+  );
+}
+
+function getSubscriptionPrice(item) {
+  return (
+    item.price ??
+    item.amount ??
+    item.totalAmount ??
+    item.cost ??
+    ""
+  );
+}
 
 function Payments() {
   const navigate = useNavigate();
   const { user: currentUser, token, logout } = useAuth();
   const { showToast } = useToast();
+
   const [payments, setPayments] = useState([]);
-  const [bookings, setBookings] = useState([]);
+  const [subscriptions, setSubscriptions] = useState([]);
   const [customers, setCustomers] = useState([]);
+
   const [form, setForm] = useState(emptyForm);
+
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [backendNotice, setBackendNotice] = useState("");
+
+  const selectedSubscription = useMemo(() => {
+    return subscriptions.find(
+      (item) => (item._id || item.id) === form.subscription,
+    );
+  }, [subscriptions, form.subscription]);
 
   const loadData = useCallback(async () => {
     setIsLoading(true);
     setBackendNotice("");
 
     try {
-      const [paymentsRes, bookingsRes, customersRes] = await Promise.all([
-        paymentsApi.list(token),
-        bookingsApi.list(token),
-        currentUser.role !== "customer"
-          ? adminApi.listCustomers(token)
-          : Promise.resolve({ data: [] }),
-      ]);
-      setPayments(paymentsRes.data || []);
-      setBookings(bookingsRes.data || []);
-      setCustomers(customersRes.data || []);
+      const [paymentsRes, subscriptionsRes, customersRes] =
+        await Promise.all([
+          paymentsApi.list(token),
+          subscriptionsApi.list(token),
+          currentUser.role !== "customer"
+            ? adminApi.listCustomers(token)
+            : Promise.resolve({ data: [] }),
+        ]);
+
+      setPayments(normalizeResponse(paymentsRes));
+      setSubscriptions(normalizeResponse(subscriptionsRes));
+      setCustomers(normalizeResponse(customersRes));
     } catch (err) {
-      setBackendNotice(err.message);
+      const message =
+        err.message || "Unable to load payment information.";
+
+      setBackendNotice(message);
+
+      showToast({
+        message,
+        type: "error",
+      });
+
       if (err.status === 401) {
         logout();
         navigate("/login", { replace: true });
@@ -52,7 +123,13 @@ function Payments() {
     } finally {
       setIsLoading(false);
     }
-  }, [logout, navigate, token, currentUser.role]);
+  }, [
+    currentUser.role,
+    logout,
+    navigate,
+    showToast,
+    token,
+  ]);
 
   useEffect(() => {
     loadData();
@@ -60,26 +137,70 @@ function Payments() {
 
   function updateForm(event) {
     const { name, value } = event.target;
+
     setForm((current) => ({
       ...current,
       [name]: value,
     }));
+
+    // auto fill amount from subscription
+    if (name === "subscription") {
+      const selected = subscriptions.find(
+        (item) => (item._id || item.id) === value,
+      );
+
+      if (selected) {
+        const price = getSubscriptionPrice(selected);
+
+        setForm((current) => ({
+          ...current,
+          subscription: value,
+          amount: price ? String(price) : "",
+        }));
+      }
+    }
   }
 
   async function handleSave(event) {
     event.preventDefault();
+
     setIsSaving(true);
+    setBackendNotice("");
 
     try {
-      const response = await paymentsApi.create(form, token);
+      const payload = {
+        customer:
+          currentUser.role === "customer"
+            ? currentUser._id
+            : form.customer,
+        subscription: form.subscription,
+        amount: Number(form.amount),
+        method: form.method,
+        status: form.status,
+      };
+
+      const response = await paymentsApi.create(payload, token);
+
       showToast({
-        message: response.message || "Payment recorded successfully",
+        message:
+          response?.message ||
+          "Payment recorded successfully.",
         type: "success",
       });
+
       setForm(emptyForm);
+
       await loadData();
     } catch (err) {
-      setBackendNotice(err.message);
+      const message =
+        err.message || "Unable to record payment.";
+
+      setBackendNotice(message);
+
+      showToast({
+        message,
+        type: "error",
+      });
     } finally {
       setIsSaving(false);
     }
@@ -90,14 +211,19 @@ function Payments() {
       <section className="mx-auto max-w-7xl">
         <div className="mb-6 flex flex-col justify-between gap-4 md:flex-row md:items-end">
           <div>
-            <p className="text-sm font-medium text-app-primary">Finance</p>
+            <p className="text-sm font-medium text-app-primary">
+              Finance
+            </p>
+
             <h1 className="mt-1 text-3xl font-semibold text-app-text">
               Payments
             </h1>
+
             <p className="mt-2 max-w-2xl text-sm leading-6 text-app-muted">
-              Record and track customer payments for bookings.
+              Record and manage subscription payments.
             </p>
           </div>
+
           <button
             className="inline-flex h-10 items-center gap-2 rounded-md border border-app-border px-4 text-sm text-app-text hover:bg-app-panel-muted"
             type="button"
@@ -105,11 +231,20 @@ function Payments() {
             disabled={isLoading}
           >
             <RefreshCw
-              className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`}
+              className={`h-4 w-4 ${
+                isLoading ? "animate-spin" : ""
+              }`}
             />
+
             Refresh
           </button>
         </div>
+
+        {backendNotice && (
+          <div className="mb-5 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {backendNotice}
+          </div>
+        )}
 
         <div className="grid gap-5 xl:grid-cols-[390px_1fr]">
           {currentUser.role !== "receptionist" && (
@@ -117,15 +252,29 @@ function Payments() {
               className="rounded-md border border-app-border bg-app-panel p-5 shadow-sm"
               onSubmit={handleSave}
             >
-              <h2 className="mb-5 text-lg font-semibold text-app-text">
-                Record Payment
-              </h2>
+              <div className="mb-5 flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-app-primary/10 text-app-primary">
+                  <CreditCard className="h-5 w-5" />
+                </div>
+
+                <div>
+                  <h2 className="text-lg font-semibold text-app-text">
+                    Record Payment
+                  </h2>
+
+                  <p className="text-sm text-app-muted">
+                    Create a payment for subscription plans.
+                  </p>
+                </div>
+              </div>
+
               <div className="space-y-4">
                 {currentUser.role !== "customer" && (
                   <label className="block">
                     <span className="mb-2 block text-sm font-medium text-app-text">
                       Customer
                     </span>
+
                     <select
                       className="h-11 w-full rounded-md border border-app-border bg-app-input px-3 text-sm outline-none focus:border-app-primary"
                       name="customer"
@@ -133,19 +282,27 @@ function Payments() {
                       onChange={updateForm}
                       required
                     >
-                      <option value="">Select Customer</option>
-                      {customers.map((c) => (
-                        <option key={c._id} value={c._id}>
-                          {c.fullName}
+                      <option value="">
+                        Select Customer
+                      </option>
+
+                      {customers.map((customer) => (
+                        <option
+                          key={customer._id || customer.id}
+                          value={customer._id || customer.id}
+                        >
+                          {getCustomerName(customer)}
                         </option>
                       ))}
                     </select>
                   </label>
                 )}
+
                 <label className="block">
                   <span className="mb-2 block text-sm font-medium text-app-text">
-                    Subscription
+                    Subscription Plan
                   </span>
+
                   <select
                     className="h-11 w-full rounded-md border border-app-border bg-app-input px-3 text-sm outline-none focus:border-app-primary"
                     name="subscription"
@@ -153,33 +310,48 @@ function Payments() {
                     onChange={updateForm}
                     required
                   >
-                    <option value="">Select Subscription</option>
-                    {bookings.map((b) => (
-                      <option key={b._id} value={b._id}>
-                        {b.room?.roomNumber
-                          ? `Room ${b.room?.roomNumber} - ${new Date(b.startDate).toLocaleDateString()}`
-                          : `Booking ${b._id}`}
+                    <option value="">
+                      Select Subscription
+                    </option>
+
+                    {subscriptions.map((subscription) => (
+                      <option
+                        key={
+                          subscription._id || subscription.id
+                        }
+                        value={
+                          subscription._id || subscription.id
+                        }
+                      >
+                        {getSubscriptionName(subscription)} -
+                        ${getSubscriptionPrice(subscription)}
                       </option>
                     ))}
                   </select>
                 </label>
+
                 <label className="block">
                   <span className="mb-2 block text-sm font-medium text-app-text">
                     Amount
                   </span>
+
                   <input
                     className="h-11 w-full rounded-md border border-app-border bg-app-input px-3 text-sm outline-none focus:border-app-primary"
                     name="amount"
                     type="number"
+                    min="0"
+                    step="0.01"
                     value={form.amount}
                     onChange={updateForm}
                     required
                   />
                 </label>
+
                 <label className="block">
                   <span className="mb-2 block text-sm font-medium text-app-text">
-                    Method
+                    Payment Method
                   </span>
+
                   <select
                     className="h-11 w-full rounded-md border border-app-border bg-app-input px-3 text-sm outline-none focus:border-app-primary"
                     name="method"
@@ -191,55 +363,158 @@ function Payments() {
                     <option value="online">Online</option>
                   </select>
                 </label>
+
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-app-text">
+                    Status
+                  </span>
+
+                  <select
+                    className="h-11 w-full rounded-md border border-app-border bg-app-input px-3 text-sm outline-none focus:border-app-primary"
+                    name="status"
+                    value={form.status}
+                    onChange={updateForm}
+                  >
+                    <option value="pending">
+                      Pending
+                    </option>
+
+                    <option value="completed">
+                      Completed
+                    </option>
+
+                    <option value="failed">
+                      Failed
+                    </option>
+                  </select>
+                </label>
+
+                {selectedSubscription && (
+                  <div className="rounded-md border border-app-border bg-app-panel-muted p-3 text-sm text-app-muted">
+                    <p>
+                      <span className="font-semibold text-app-text">
+                        Plan:
+                      </span>{" "}
+                      {getSubscriptionName(
+                        selectedSubscription,
+                      )}
+                    </p>
+
+                    <p>
+                      <span className="font-semibold text-app-text">
+                        Billing:
+                      </span>{" "}
+                      {selectedSubscription.billingCycle ||
+                        "monthly"}
+                    </p>
+                  </div>
+                )}
               </div>
+
               <button
-                className="mt-6 w-full inline-flex h-11 items-center justify-center gap-2 rounded-md bg-app-primary px-4 text-sm font-semibold text-app-primary-text hover:bg-app-primary-hover disabled:opacity-70"
+                className="mt-6 inline-flex h-11 w-full items-center justify-center gap-2 rounded-md bg-app-primary px-4 text-sm font-semibold text-app-primary-text hover:bg-app-primary-hover disabled:opacity-70"
                 type="submit"
                 disabled={isSaving}
               >
                 <Plus className="h-4 w-4" />
-                {isSaving ? "Processing..." : "Record Payment"}
+
+                {isSaving
+                  ? "Processing..."
+                  : "Record Payment"}
               </button>
             </form>
           )}
 
           <section className="overflow-hidden rounded-md border border-app-border bg-app-panel shadow-sm">
-            <table className="w-full text-left text-sm">
-              <thead className="border-b border-app-border bg-app-panel text-xs uppercase text-app-muted">
-                <tr>
-                  <th className="px-5 py-3">Customer</th>
-                  <th className="px-5 py-3">Subscription</th>
-                  <th className="px-5 py-3">Amount</th>
-                  <th className="px-5 py-3">Method</th>
-                  <th className="px-5 py-3">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-app-border">
-                {payments.map((item) => (
-                  <tr key={item._id}>
-                    <td className="px-5 py-4 font-medium text-app-text">
-                      {item.customer?.fullName || "N/A"}
-                    </td>
-                    <td className="px-5 py-4 text-app-muted text-xs">
-                      Room {item.subscription?.room?.roomNumber || "N/A"}
-                    </td>
-                    <td className="px-5 py-4 font-semibold text-app-text">
-                      ${item.amount}
-                    </td>
-                    <td className="px-5 py-4 text-app-muted capitalize">
-                      {item.method}
-                    </td>
-                    <td className="px-5 py-4">
-                      <span
-                        className={`text-xs font-semibold px-2 py-1 rounded-full ${item.status === "completed" ? "bg-app-success/10 text-app-success" : "bg-app-warning/10 text-app-warning"}`}
-                      >
-                        {item.status}
-                      </span>
-                    </td>
+            <div className="border-b border-app-border px-5 py-4">
+              <h2 className="text-lg font-semibold text-app-text">
+                Payment History
+              </h2>
+            </div>
+
+            {isLoading ? (
+              <div className="p-8 text-center text-sm text-app-muted">
+                Loading payments...
+              </div>
+            ) : payments.length === 0 ? (
+              <div className="p-8 text-center">
+                <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-app-panel-muted text-app-primary">
+                  <CreditCard className="h-8 w-8" />
+                </div>
+
+                <h2 className="text-xl font-semibold text-app-text">
+                  No Payments Found
+                </h2>
+
+                <p className="mt-2 text-sm text-app-muted">
+                  Payment records will appear here.
+                </p>
+              </div>
+            ) : (
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-app-border bg-app-panel text-xs uppercase text-app-muted">
+                  <tr>
+                    <th className="px-5 py-3">
+                      Customer
+                    </th>
+
+                    <th className="px-5 py-3">
+                      Subscription
+                    </th>
+
+                    <th className="px-5 py-3">
+                      Amount
+                    </th>
+
+                    <th className="px-5 py-3">
+                      Method
+                    </th>
+
+                    <th className="px-5 py-3">
+                      Status
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+
+                <tbody className="divide-y divide-app-border">
+                  {payments.map((item) => (
+                    <tr key={item._id || item.id}>
+                      <td className="px-5 py-4 font-medium text-app-text">
+                        {getCustomerName(item)}
+                      </td>
+
+                      <td className="px-5 py-4 text-app-muted">
+                        {getSubscriptionName(
+                          item.subscription,
+                        )}
+                      </td>
+
+                      <td className="px-5 py-4 font-semibold text-app-text">
+                        ${item.amount || 0}
+                      </td>
+
+                      <td className="px-5 py-4 capitalize text-app-muted">
+                        {item.method || "N/A"}
+                      </td>
+
+                      <td className="px-5 py-4">
+                        <span
+                          className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                            item.status === "completed"
+                              ? "bg-app-success/10 text-app-success"
+                              : item.status === "pending"
+                                ? "bg-app-warning/10 text-app-warning"
+                                : "bg-app-danger/10 text-app-danger"
+                          }`}
+                        >
+                          {item.status || "pending"}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </section>
         </div>
       </section>
