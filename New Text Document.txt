@@ -1,180 +1,250 @@
-// subscription/model.js
+import { useCallback, useEffect, useState } from "react";
+import { CreditCard, Plus, RefreshCw } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { paymentsApi } from "../api/payments";
+import { bookingsApi } from "../api/bookings";
+import { adminApi } from "../api/admin";
+import AdminLayout from "../components/AdminLayout";
+import { useToast } from "../components/useToast";
+import { useAuth } from "../context/useAuth";
 
-const mongoose = require("mongoose");
-
-const subscriptionSchema = new mongoose.Schema(
-  {
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-
-    billingCycle: {
-      type: String,
-      enum: ["monthly", "quarterly", "annual"],
-      default: "monthly",
-    },
-
-    price: {
-      type: Number,
-      required: true,
-      default: 0,
-    },
-
-    duration: {
-      type: Number,
-      default: 30,
-    },
-
-    maxUsers: {
-      type: Number,
-      default: 1,
-    },
-
-    status: {
-      type: String,
-      enum: ["active", "inactive", "pending"],
-      default: "active",
-    },
-
-    description: {
-      type: String,
-      default: "",
-    },
-
-    features: {
-      type: [String],
-      default: [],
-    },
-  },
-  {
-    timestamps: true,
-  }
-);
-
-module.exports = mongoose.model("Subscription", subscriptionSchema);
-
-
-
-
-
-// subscription/controller.js
-
-const Subscription = require("./model");
-
-// GET ALL
-exports.getSubscriptions = async (req, res) => {
-  try {
-    const subscriptions = await Subscription.find().sort({
-      createdAt: -1,
-    });
-
-    res.status(200).json(subscriptions);
-  } catch (error) {
-    res.status(500).json({
-      message: "Failed to fetch subscriptions",
-      error: error.message,
-    });
-  }
+const emptyForm = {
+  customer: "",
+  subscription: "",
+  amount: "",
+  method: "cash",
+  status: "pending",
 };
 
-// CREATE
-exports.createSubscription = async (req, res) => {
-  try {
-    const subscription = await Subscription.create(req.body);
+function Payments() {
+  const navigate = useNavigate();
+  const { user: currentUser, token, logout } = useAuth();
+  const { showToast } = useToast();
+  const [payments, setPayments] = useState([]);
+  const [bookings, setBookings] = useState([]);
+  const [customers, setCustomers] = useState([]);
+  const [form, setForm] = useState(emptyForm);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [backendNotice, setBackendNotice] = useState("");
 
-    res.status(201).json([subscription]);
-  } catch (error) {
-    res.status(500).json({
-      message: "Failed to create subscription",
-      error: error.message,
-    });
-  }
-};
+  const loadData = useCallback(async () => {
+    setIsLoading(true);
+    setBackendNotice("");
 
-// UPDATE
-exports.updateSubscription = async (req, res) => {
-  try {
-    const subscription = await Subscription.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      {
-        new: true,
+    try {
+      const [paymentsRes, bookingsRes, customersRes] = await Promise.all([
+        paymentsApi.list(token),
+        bookingsApi.list(token),
+        currentUser.role !== "customer"
+          ? adminApi.listCustomers(token)
+          : Promise.resolve({ data: [] }),
+      ]);
+      setPayments(paymentsRes.data || []);
+      setBookings(bookingsRes.data || []);
+      setCustomers(customersRes.data || []);
+    } catch (err) {
+      setBackendNotice(err.message);
+      if (err.status === 401) {
+        logout();
+        navigate("/login", { replace: true });
       }
-    );
-
-    if (!subscription) {
-      return res.status(404).json({
-        message: "Subscription not found",
-      });
+    } finally {
+      setIsLoading(false);
     }
+  }, [logout, navigate, token, currentUser.role]);
 
-    res.status(200).json([subscription]);
-  } catch (error) {
-    res.status(500).json({
-      message: "Failed to update subscription",
-      error: error.message,
-    });
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  function updateForm(event) {
+    const { name, value } = event.target;
+    setForm((current) => ({
+      ...current,
+      [name]: value,
+    }));
   }
-};
 
-// DELETE
-exports.deleteSubscription = async (req, res) => {
-  try {
-    const subscription = await Subscription.findByIdAndDelete(
-      req.params.id
-    );
+  async function handleSave(event) {
+    event.preventDefault();
+    setIsSaving(true);
 
-    if (!subscription) {
-      return res.status(404).json({
-        message: "Subscription not found",
+    try {
+      const response = await paymentsApi.create(form, token);
+      showToast({
+        message: response.message || "Payment recorded successfully",
+        type: "success",
       });
+      setForm(emptyForm);
+      await loadData();
+    } catch (err) {
+      setBackendNotice(err.message);
+    } finally {
+      setIsSaving(false);
     }
-
-    res.status(200).json({
-      message: "Subscription deleted successfully",
-    });
-  } catch (error) {
-    res.status(500).json({
-      message: "Failed to delete subscription",
-      error: error.message,
-    });
   }
-};
 
+  return (
+    <AdminLayout>
+      <section className="mx-auto max-w-7xl">
+        <div className="mb-6 flex flex-col justify-between gap-4 md:flex-row md:items-end">
+          <div>
+            <p className="text-sm font-medium text-app-primary">Finance</p>
+            <h1 className="mt-1 text-3xl font-semibold text-app-text">
+              Payments
+            </h1>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-app-muted">
+              Record and track customer payments for bookings.
+            </p>
+          </div>
+          <button
+            className="inline-flex h-10 items-center gap-2 rounded-md border border-app-border px-4 text-sm text-app-text hover:bg-app-panel-muted"
+            type="button"
+            onClick={loadData}
+            disabled={isLoading}
+          >
+            <RefreshCw
+              className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`}
+            />
+            Refresh
+          </button>
+        </div>
 
+        <div className="grid gap-5 xl:grid-cols-[390px_1fr]">
+          {currentUser.role !== "receptionist" && (
+            <form
+              className="rounded-md border border-app-border bg-app-panel p-5 shadow-sm"
+              onSubmit={handleSave}
+            >
+              <h2 className="mb-5 text-lg font-semibold text-app-text">
+                Record Payment
+              </h2>
+              <div className="space-y-4">
+                {currentUser.role !== "customer" && (
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-medium text-app-text">
+                      Customer
+                    </span>
+                    <select
+                      className="h-11 w-full rounded-md border border-app-border bg-app-input px-3 text-sm outline-none focus:border-app-primary"
+                      name="customer"
+                      value={form.customer}
+                      onChange={updateForm}
+                      required
+                    >
+                      <option value="">Select Customer</option>
+                      {customers.map((c) => (
+                        <option key={c._id} value={c._id}>
+                          {c.fullName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-app-text">
+                    Subscription
+                  </span>
+                  <select
+                    className="h-11 w-full rounded-md border border-app-border bg-app-input px-3 text-sm outline-none focus:border-app-primary"
+                    name="subscription"
+                    value={form.subscription}
+                    onChange={updateForm}
+                    required
+                  >
+                    <option value="">Select Subscription</option>
+                    {bookings.map((b) => (
+                      <option key={b._id} value={b._id}>
+                        {b.room?.roomNumber
+                          ? `Room ${b.room?.roomNumber} - ${new Date(b.startDate).toLocaleDateString()}`
+                          : `Booking ${b._id}`}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-app-text">
+                    Amount
+                  </span>
+                  <input
+                    className="h-11 w-full rounded-md border border-app-border bg-app-input px-3 text-sm outline-none focus:border-app-primary"
+                    name="amount"
+                    type="number"
+                    value={form.amount}
+                    onChange={updateForm}
+                    required
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-app-text">
+                    Method
+                  </span>
+                  <select
+                    className="h-11 w-full rounded-md border border-app-border bg-app-input px-3 text-sm outline-none focus:border-app-primary"
+                    name="method"
+                    value={form.method}
+                    onChange={updateForm}
+                  >
+                    <option value="cash">Cash</option>
+                    <option value="card">Card</option>
+                    <option value="online">Online</option>
+                  </select>
+                </label>
+              </div>
+              <button
+                className="mt-6 w-full inline-flex h-11 items-center justify-center gap-2 rounded-md bg-app-primary px-4 text-sm font-semibold text-app-primary-text hover:bg-app-primary-hover disabled:opacity-70"
+                type="submit"
+                disabled={isSaving}
+              >
+                <Plus className="h-4 w-4" />
+                {isSaving ? "Processing..." : "Record Payment"}
+              </button>
+            </form>
+          )}
 
+          <section className="overflow-hidden rounded-md border border-app-border bg-app-panel shadow-sm">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-app-border bg-app-panel text-xs uppercase text-app-muted">
+                <tr>
+                  <th className="px-5 py-3">Customer</th>
+                  <th className="px-5 py-3">Subscription</th>
+                  <th className="px-5 py-3">Amount</th>
+                  <th className="px-5 py-3">Method</th>
+                  <th className="px-5 py-3">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-app-border">
+                {payments.map((item) => (
+                  <tr key={item._id}>
+                    <td className="px-5 py-4 font-medium text-app-text">
+                      {item.customer?.fullName || "N/A"}
+                    </td>
+                    <td className="px-5 py-4 text-app-muted text-xs">
+                      Room {item.subscription?.room?.roomNumber || "N/A"}
+                    </td>
+                    <td className="px-5 py-4 font-semibold text-app-text">
+                      ${item.amount}
+                    </td>
+                    <td className="px-5 py-4 text-app-muted capitalize">
+                      {item.method}
+                    </td>
+                    <td className="px-5 py-4">
+                      <span
+                        className={`text-xs font-semibold px-2 py-1 rounded-full ${item.status === "completed" ? "bg-app-success/10 text-app-success" : "bg-app-warning/10 text-app-warning"}`}
+                      >
+                        {item.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+        </div>
+      </section>
+    </AdminLayout>
+  );
+}
 
-
-// subscription/routes.js
-
-const express = require("express");
-
-const router = express.Router();
-
-const {
-  getSubscriptions,
-  createSubscription,
-  updateSubscription,
-  deleteSubscription,
-} = require("./controller");
-
-router.get("/", getSubscriptions);
-
-router.post("/", createSubscription);
-
-router.put("/:id", updateSubscription);
-
-router.delete("/:id", deleteSubscription);
-
-module.exports = router;
-
-
-
-
-
-
-const subscriptionRoutes = require("./subscription/routes");
-
-app.use("/api/subscriptions", subscriptionRoutes);
+export default Payments;
